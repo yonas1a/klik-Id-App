@@ -1,8 +1,14 @@
 import { SignJWT, importPKCS8 } from 'jose';
-import serviceAccount from '../../service-account.json';
 
 let cachedToken: string | null = null;
 let tokenExpiry: number = 0;
+
+// Parse credentials from Environment Variables
+const serviceAccount = {
+  client_email: import.meta.env.VITE_GOOGLE_CLIENT_EMAIL,
+  private_key: import.meta.env.VITE_GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+  token_uri: "https://oauth2.googleapis.com/token",
+};
 
 export async function getGoogleAccessToken() {
   if (cachedToken && Date.now() < tokenExpiry) {
