@@ -1,0 +1,1 @@
+This folder holds public assets. You can upload template.png here.
