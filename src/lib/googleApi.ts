@@ -3,98 +3,114 @@ import { SignJWT, importPKCS8 } from 'jose';
 let cachedToken: string | null = null;
 let tokenExpiry: number = 0;
 
-// These VITE_ vars are used for Sheets operations only (client-side)
-const CLIENT_EMAIL = import.meta.env.VITE_GOOGLE_CLIENT_EMAIL as string;
-const PRIVATE_KEY_RAW = import.meta.env.VITE_GOOGLE_PRIVATE_KEY as string;
-const TOKEN_URI = 'https://oauth2.googleapis.com/token';
-
-export async function getGoogleAccessToken(): Promise<string> {
+export async function getGoogleAccessToken() {
   if (cachedToken && Date.now() < tokenExpiry) {
     return cachedToken;
   }
-
-  if (!CLIENT_EMAIL || !PRIVATE_KEY_RAW) {
-    throw new Error('Missing VITE_GOOGLE_CLIENT_EMAIL or VITE_GOOGLE_PRIVATE_KEY env vars');
+  
+  // 1. Try to fetch the token securely from the Vercel API route first
+  try {
+    const response = await fetch('/api/google-token');
+    if (response.ok) {
+      const data = await response.json();
+      if (data.access_token) {
+        cachedToken = data.access_token;
+        tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+        return cachedToken;
+      }
+    }
+  } catch (err) {
+    console.warn("Secure API token route unavailable, falling back to local VITE_ variables:", err);
   }
 
-  const privateKey = await importPKCS8(PRIVATE_KEY_RAW.replace(/\\n/g, '\n'), 'RS256');
+  // 2. Fallback to client-side JWT generation (convenient for local npm run dev testing)
+  const privateKeyStr = import.meta.env.VITE_GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+  const clientEmail = import.meta.env.VITE_GOOGLE_CLIENT_EMAIL;
+  const tokenUri = import.meta.env.VITE_GOOGLE_TOKEN_URI || "https://oauth2.googleapis.com/token";
+
+  if (!privateKeyStr || !clientEmail) {
+    throw new Error("Missing Google Service Account credentials in environment variables.");
+  }
+
+  const privateKey = await importPKCS8(privateKeyStr, 'RS256');
 
   const jwt = await new SignJWT({
-    iss: CLIENT_EMAIL,
-    scope: 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.readonly',
-    aud: TOKEN_URI,
+    iss: clientEmail,
+    scope: "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.readonly",
+    aud: tokenUri,
   })
     .setProtectedHeader({ alg: 'RS256' })
     .setIssuedAt()
     .setExpirationTime('1h')
     .sign(privateKey);
 
-  const response = await fetch(TOKEN_URI, {
+  const response = await fetch(tokenUri, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
       assertion: jwt,
-    }),
+    })
   });
-
+  
   const data = await response.json();
   if (!response.ok) throw new Error(data.error_description || 'Failed to get access token');
-
+  
   cachedToken = data.access_token;
   tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
-  return cachedToken!;
+  return cachedToken;
 }
 
 export async function appendSheetData(url: string, rowValues: any[]) {
   const match = url.match(/\/d\/([a-zA-Z0-9-_]+)/);
-  if (!match) throw new Error('Invalid Google Sheets URL format. Could not extract ID.');
+  if (!match) throw new Error("Invalid Google Sheets URL format. Could not extract ID.");
   const spreadsheetId = match[1];
 
   const token = await getGoogleAccessToken();
-  const res = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A:Z:append?valueInputOption=USER_ENTERED`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ values: [rowValues] }),
-    }
-  );
-
+  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A:Z:append?valueInputOption=USER_ENTERED`, {
+    method: 'POST',
+    headers: { 
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      values: [rowValues]
+    })
+  });
+  
   const data = await res.json();
   if (!res.ok) {
     throw new Error(data?.error?.message || `Failed to append data (${res.status})`);
   }
+  
   return data;
 }
 
 export async function fetchSheetData(url: string) {
   const match = url.match(/\/d\/([a-zA-Z0-9-_]+)/);
-  if (!match) throw new Error('Invalid Google Sheets URL format. Could not extract ID.');
+  if (!match) throw new Error("Invalid Google Sheets URL format. Could not extract ID.");
   const spreadsheetId = match[1];
 
+  // Fetch as CSV from public Google Sheet
   const csvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:csv`;
   const res = await fetch(csvUrl);
   if (!res.ok) {
     throw new Error(`Failed to fetch data (${res.status}). Ensure the sheet is public.`);
   }
-
+  
   const text = await res.text();
-
-  // Parse CSV
-  const rows: string[][] = [];
-  let currentRow: string[] = [];
+  
+  // Parse CSV (simple parser for this fallback)
+  const rows = [];
+  let currentRow = [];
   let currentVal = '';
   let inQuotes = false;
-
+  
   for (let i = 0; i < text.length; i++) {
     const char = text[i];
     if (inQuotes) {
       if (char === '"') {
-        if (text[i + 1] === '"') {
+        if (text[i+1] === '"') {
           currentVal += '"';
           i++;
         } else {
@@ -110,7 +126,7 @@ export async function fetchSheetData(url: string) {
         currentRow.push(currentVal);
         currentVal = '';
       } else if (char === '\n' || char === '\r') {
-        if (char === '\r' && text[i + 1] === '\n') i++;
+        if (char === '\r' && text[i+1] === '\n') i++;
         currentRow.push(currentVal);
         rows.push(currentRow);
         currentRow = [];
@@ -124,60 +140,100 @@ export async function fetchSheetData(url: string) {
     currentRow.push(currentVal);
     rows.push(currentRow);
   }
-
+  
   return rows;
 }
 
-// ── Image loading via server-side proxy ────────────────────────────────────────
-
 const imageCache = new Map<string, string>();
 
-function extractDriveFileId(imageUrl: string): string | null {
-  try {
-    const parsedUrl = new URL(imageUrl);
-    if (!parsedUrl.hostname.includes('drive.google.com')) return null;
-    if (imageUrl.includes('open?id=') || imageUrl.includes('uc?id=')) {
-      return parsedUrl.searchParams.get('id');
-    }
-    if (imageUrl.includes('/file/d/')) {
-      const match = imageUrl.match(/\/d\/([a-zA-Z0-9-_]+)/);
-      return match ? match[1] : null;
-    }
-  } catch {
-    // not a valid URL — maybe it's a bare file ID
-  }
-  // Treat plain strings that look like Drive IDs as file IDs directly
-  if (/^[a-zA-Z0-9_-]{25,}$/.test(imageUrl)) return imageUrl;
-  return null;
-}
-
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
-}
-
 export async function fetchDriveImageAsBase64(imageUrl: string): Promise<string> {
-  if (!imageUrl) throw new Error('No image URL provided');
+  if (!imageUrl) throw new Error("No image URL provided");
   if (imageCache.has(imageUrl)) return imageCache.get(imageUrl)!;
 
-  const driveFileId = extractDriveFileId(imageUrl);
-  if (!driveFileId) throw new Error(`Could not extract Drive file ID from: ${imageUrl}`);
-
-  // Route image fetching through the secure server-side proxy
-  // Works in production (Vercel) and local dev with `vercel dev`
-  const res = await fetch(`/api/drive-image?id=${driveFileId}`);
-
-  if (!res.ok) {
-    const errText = await res.text();
-    console.error(`[fetchDriveImage] API proxy error ${res.status}:`, errText);
-    throw new Error(`Failed to load image (${res.status})`);
+  let driveFileId: string | null = null;
+  try {
+    const parsedUrl = new URL(imageUrl);
+    if (parsedUrl.hostname.includes('drive.google.com')) {
+      if (imageUrl.includes('open?id=')) {
+        driveFileId = parsedUrl.searchParams.get('id');
+      } else if (imageUrl.includes('uc?id=')) {
+        driveFileId = parsedUrl.searchParams.get('id');
+      } else if (imageUrl.includes('/file/d/')) {
+        const match = imageUrl.match(/\/d\/([a-zA-Z0-9-_]+)/);
+        if (match) driveFileId = match[1];
+      }
+    }
+  } catch (e) {
+    // ignore
   }
 
-  const base64 = await blobToBase64(await res.blob());
-  imageCache.set(imageUrl, base64);
-  return base64;
+  try {
+    if (driveFileId) {
+      const token = await getGoogleAccessToken();
+      const res = await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const blob = await res.blob();
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+        imageCache.set(imageUrl, base64);
+        return base64;
+      }
+    }
+  } catch(err) {
+    console.warn("Drive fetch failed, trying proxy instead", err);
+  }
+
+  // Fallback to direct fetch first, then proxy
+  if (imageUrl.startsWith('http')) {
+      let finalUrl = imageUrl;
+      if (imageUrl.includes('drive.google.com/open?id=')) {
+        finalUrl = imageUrl.replace('open?id=', 'uc?id=');
+      } else if (imageUrl.includes('drive.google.com/file/d/')) {
+         const match = imageUrl.match(/\/d\/([a-zA-Z0-9-_]+)/);
+         if (match) finalUrl = `https://drive.google.com/uc?id=${match[1]}`;
+      }
+      
+      try {
+        const directRes = await fetch(finalUrl);
+        if (directRes.ok) {
+           const blob = await directRes.blob();
+           const base64 = await new Promise<string>((resolve, reject) => {
+             const reader = new FileReader();
+             reader.onloadend = () => resolve(reader.result as string);
+             reader.onerror = reject;
+             reader.readAsDataURL(blob);
+           });
+           imageCache.set(imageUrl, base64);
+           return base64;
+        }
+      } catch (err) {
+        // Direct fetch failed (likely CORS), proceed to proxy
+      }
+
+      try {
+        const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(finalUrl)}`;
+        const fallbackRes = await fetch(proxyUrl);
+        if (fallbackRes.ok) {
+           const blob = await fallbackRes.blob();
+           const base64 = await new Promise<string>((resolve, reject) => {
+             const reader = new FileReader();
+             reader.onloadend = () => resolve(reader.result as string);
+             reader.onerror = reject;
+             reader.readAsDataURL(blob);
+           });
+           imageCache.set(imageUrl, base64);
+           return base64;
+        }
+      } catch (err) {
+        console.warn("Proxy fetch failed", err);
+      }
+  }
+  
+  throw new Error("Failed to load image");
 }
