@@ -5,7 +5,8 @@ import { detectFace } from '../lib/faceDetection';
 export interface Employee {
   Name: string;
   Role: string;
-  ID: string;
+  ID?: string;
+  id?: string;
   Subcity: string;
   Phone: string;
   Photo: string;
@@ -149,7 +150,7 @@ export function IdCard({
 
         {/* Text Details Positioned manually to match the template colons */}
         <div className="absolute z-30 text-lg font-medium text-gray-900 leading-tight truncate" style={{ left: '38%', top: '80.5%', width: '55%' }}>
-            {employee.ID}
+            {employee.id || employee.ID}
         </div>
         
         <div className="absolute z-30 text-lg font-medium text-gray-900 leading-tight truncate" style={{ left: '38%', top: '85.5%', width: '55%' }}>

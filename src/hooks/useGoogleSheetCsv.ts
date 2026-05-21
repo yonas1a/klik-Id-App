@@ -4,7 +4,8 @@ import Papa from 'papaparse';
 export interface Employee {
   Name: string;
   Role: string;
-  ID: string;
+  ID?: string;
+  id?: string;
   Subcity: string;
   Phone: string;
   Photo: string;
